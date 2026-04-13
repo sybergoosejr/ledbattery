@@ -5,7 +5,7 @@ import psutil
 import wmi
 
 # Configuration
-COM_PORT = 'COM4'
+COM_PORT = 'COM3'
 BAUD_RATE = 115200
 WIDTH = 9
 HEIGHT = 34
@@ -18,9 +18,11 @@ PULSE_SPEED_MODIFIER = 2.0
 CMD_STAGE_COL = 0x07
 CMD_FLUSH_COLS = 0x08
 FPS = 10
+RECONNECT_DELAY = 5.0  # Seconds between reconnect attempts
 
-ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
 wmi_interface = wmi.WMI(namespace="root\\wmi")
+ser = None
+last_reconnect_attempt = 0  # Initialize to try immediately
 
 def send_column(column_id, values):
     cmd = [0x32, 0xAC, CMD_STAGE_COL, column_id]
@@ -66,9 +68,9 @@ def create_battery_frame(p, c, pulse_fade):
                     if col == 4:
                         fade_factor = min(1.0, partial_fraction / 0.33)  # 0 to 0.33
                     elif col in (3, 5):
-                        fade_factor = max(0.0, (partial_fraction - 0.33) / 0.33)  # 0.33 to 0.66
+                        fade_factor = max(0.0, min(1.0, (partial_fraction - 0.33) / 0.33))  # 0.33 to 0.66, capped at 1
                     elif col in (2, 6):
-                        fade_factor = max(0.0, (partial_fraction - 0.66) / 0.34)  # 0.66 to 1.0
+                        fade_factor = max(0.0, min(1.0, (partial_fraction - 0.66) / 0.34))  # 0.66 to 1.0, capped at 1
                     column[row] = int(round(MAX_BRIGHT * fade_factor))
                 else:
                     column[row] = 0
@@ -147,12 +149,36 @@ while True:
         c = None
 
     columns = create_battery_frame(p, c, pulse_fade)
-    for col in range(WIDTH):
-        send_column(col, columns[col])
-    send_flush()
+
+    # Handle serial connection and sending
+    current_time = time.time()
+    if ser is None or not ser.is_open:
+        if current_time - last_reconnect_attempt >= RECONNECT_DELAY:
+            try:
+                ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
+                print("Serial device connected!")
+            except Exception as e:
+                print(f"Failed to connect to serial device: {e}. Retrying in {RECONNECT_DELAY} seconds.")
+            last_reconnect_attempt = current_time
+    else:
+        try:
+            for col in range(WIDTH):
+                send_column(col, columns[col])
+            send_flush()
+        except (serial.SerialException, OSError) as e:
+            print(f"Serial error during send: {e}. Disconnecting and will retry.")
+            try:
+                ser.close()
+            except:
+                pass
+            ser = None
+            last_reconnect_attempt = current_time  # Retry soon
 
     elapsed = time.time() - loop_start
     if elapsed < frame_time:
         time.sleep(frame_time - elapsed)
 
-ser.close()
+if ser:
+    ser.close()
+
+input("Press Enter to exit...")
